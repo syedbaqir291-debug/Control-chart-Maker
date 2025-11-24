@@ -27,18 +27,20 @@ if uploaded_file is not None:
 
     sheet_name = st.sidebar.selectbox("Select sheet that contains data", options=sheets)
     if sheet_name:
-        df = pd.read_excel(xl, sheet_name=sheet_name)
+        df = pd.read_excel(xl, sheet_name=sheet_name, header=0)
         st.write("**Preview of selected sheet**")
         st.dataframe(df.head())
 
         # Select time column
         st.sidebar.subheader("Time / Grouping")
         time_col = st.sidebar.selectbox("Select the Time/Batch column (used for x-axis / grouping)", options=df.columns)
-        time_slot = st.sidebar.selectbox("Select time slot / aggregation", options=["As-is (no aggregation)", "Monthly", "Quarterly", "Yearly", "Batch - as unique values"]) 
+        time_slot = st.sidebar.selectbox("Select time slot / aggregation",
+                                         options=["As-is (no aggregation)", "Monthly", "Quarterly", "Yearly", "Batch - as unique values"]) 
 
         # Select parameter columns (allow multiple)
         st.sidebar.subheader("Parameters for Control Chart")
-        param_cols = st.sidebar.multiselect("Select one or more parameter columns", options=[c for c in df.columns if c != time_col])
+        param_cols = st.sidebar.multiselect("Select one or more parameter columns",
+                                            options=[c for c in df.columns if c != time_col])
 
         if len(param_cols) == 0:
             st.info("Select at least one parameter column from the sidebar to proceed.")
@@ -49,11 +51,7 @@ if uploaded_file is not None:
 
                 # Attempt to parse time column to datetime if possible
                 x = working[time_col].copy()
-                parsed = None
-                try:
-                    parsed = pd.to_datetime(x, infer_datetime_format=True, errors='coerce')
-                except Exception:
-                    parsed = pd.Series([pd.NaT]*len(x))
+                parsed = pd.to_datetime(x, infer_datetime_format=True, errors='coerce')
 
                 if time_slot != "As-is (no aggregation)":
                     if parsed.notna().all():
@@ -67,7 +65,6 @@ if uploaded_file is not None:
                         else:
                             working['_period'] = working[time_col]
                     else:
-                        # fallback to using raw values as groups
                         working['_period'] = working[time_col]
                 else:
                     working['_period'] = working[time_col]
@@ -76,28 +73,53 @@ if uploaded_file is not None:
                 out_xlsx = BytesIO()
                 writer = pd.ExcelWriter(out_xlsx, engine='openpyxl')
 
-                # We'll build PPTX
+                # Build PPTX
                 prs = Presentation()
                 title_slide_layout = prs.slide_layouts[5]
 
-                # For each selected parameter compute statistics and add columns
+                # For each selected parameter compute stats
                 for col in param_cols:
-                    col_values = working[col].astype('float')
+
+                    # -----------------------------
+                    # SAFE CLEANING OF NUMERIC DATA
+                    # -----------------------------
+                    working[col] = (
+                        working[col]
+                        .astype(str)
+                        .str.replace(',', '', regex=False)
+                        .str.strip()
+                        .replace(['-', '–', '—', 'N/A', 'na', '', None], np.nan)
+                    )
+
+                    # Convert to numeric safely
+                    working[col] = pd.to_numeric(working[col], errors='coerce')
+
+                    col_values = working[col]
+
+                    # Drop all NaN rows for statistical calculation
+                    clean_vals = col_values.dropna()
+
+                    if clean_vals.empty:
+                        st.error(f"Column '{col}' has no numeric data.")
+                        continue
 
                     # CL: mean
-                    CL = col_values.mean()
+                    CL = clean_vals.mean()
 
-                    # Moving Ranges:
-                    MR = col_values.diff().abs()
-                    # first MR is NA - we'll keep as NaN
+                    # Moving Range (MR)
+                    MR = clean_vals.diff().abs()
                     MRbar = MR[1:].mean()
 
-                    # constants
+                    # UCL / LCL calculation
                     d2 = 1.128
-                    UCL = CL + 3 * (MRbar / d2) if not np.isnan(MRbar) else CL
-                    LCL = CL - 3 * (MRbar / d2) if not np.isnan(MRbar) else CL
-                    if LCL < 0:
-                        LCL = 0
+                    if not np.isnan(MRbar):
+                        UCL = CL + 3 * (MRbar / d2)
+                        LCL = CL - 3 * (MRbar / d2)
+                        if LCL < 0:
+                            LCL = 0
+                    else:
+                        UCL = CL
+                        LCL = CL
 
                     # Add new columns to working df
                     working[f'{col}_CL'] = CL
@@ -106,7 +128,7 @@ if uploaded_file is not None:
                     working[f'{col}_UCL'] = UCL
                     working[f'{col}_LCL'] = LCL
 
-                    # For charting: group by period if aggregation requested
+                    # Grouping for chart
                     chart_df = working[[time_col, '_period', col]].copy()
                     if time_slot != 'As-is (no aggregation)':
                         chart_grouped = chart_df.groupby('_period')[col].mean().reset_index()
@@ -116,7 +138,7 @@ if uploaded_file is not None:
                         x_vals = chart_df[time_col]
                         y_vals = chart_df[col]
 
-                    # Create matplotlib chart
+                    # Create chart
                     fig, ax = plt.subplots(figsize=(10,4))
                     ax.plot(x_vals, y_vals, marker='o', label=col)
                     ax.axhline(CL, linestyle='--', label='CL')
@@ -129,36 +151,34 @@ if uploaded_file is not None:
                     plt.xticks(rotation=45)
                     plt.tight_layout()
 
-                    # save chart image to bytes
                     img_bytes = BytesIO()
                     fig.savefig(img_bytes, format='png', dpi=150)
                     img_bytes.seek(0)
                     plt.close(fig)
 
-                    # Add slide with chart image
                     slide = prs.slides.add_slide(title_slide_layout)
-                    left = Inches(0.5)
-                    top = Inches(0.7)
-                    slide.shapes.add_picture(img_bytes, left, top, width=Inches(9))
+                    slide.shapes.add_picture(img_bytes, Inches(0.5), Inches(0.7), width=Inches(9))
 
-                # Write updated dataframe to Excel
+                # Write updated df to Excel
                 working.to_excel(writer, sheet_name=sheet_name, index=False)
                 writer.save()
                 out_xlsx.seek(0)
 
-                # Save pptx to BytesIO
+                # Save PPTX
                 pptx_io = BytesIO()
                 prs.save(pptx_io)
                 pptx_io.seek(0)
 
                 st.success('Processing complete. Download the outputs below:')
-                st.download_button('Download updated Excel', data=out_xlsx, file_name='control_chart_output.xlsx', mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
-                st.download_button('Download PowerPoint (charts as images)', data=pptx_io, file_name='control_charts.pptx', mime='application/vnd.openxmlformats-officedocument.presentationml.presentation')
+                st.download_button('Download updated Excel', data=out_xlsx,
+                                   file_name='control_chart_output.xlsx',
+                                   mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+                st.download_button('Download PowerPoint (charts as images)', data=pptx_io,
+                                   file_name='control_charts.pptx',
+                                   mime='application/vnd.openxmlformats-officedocument.presentation.mspresentation')
 
                 st.markdown("---")
                 st.caption('Footer: OMAC Developer by SM Baqir 2025')
 
 else:
     st.info('Upload an Excel workbook to get started.')
-
-# End of app
