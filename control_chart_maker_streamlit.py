@@ -1,71 +1,69 @@
-# runcharts_streamlit_revamped.py
 import streamlit as st
 import pandas as pd
-import matplotlib.pyplot as plt
 import numpy as np
+from io import BytesIO
 
-st.set_page_config(page_title="Premium Control Chart Tool", layout="wide")
-st.title("📊 OMAC Control Chart Tool")
-st.markdown("""
-This tool generates control charts from your data.
-- Upload Excel/CSV
-- Select column(s)
-- Automatically considers all numeric data
-""")
+st.set_page_config(page_title="Control Chart Excel Updater (QA OMAC Tools)", layout="wide")
+st.markdown("<h1 style='text-align:left;'>Control Chart Excel Updater (QA OMAC Tools)</h1>", unsafe_allow_html=True)
+st.markdown("---")
 
-# -----------------------------
-# Upload Data
-# -----------------------------
-uploaded_file = st.file_uploader("Upload your Excel/CSV file", type=["xlsx", "csv"])
+# --- Upload Excel ---
+st.sidebar.header("Upload & Setup")
+uploaded_file = st.sidebar.file_uploader("Upload an Excel workbook (.xlsx)", type=["xlsx"], key="file_upload")
+
 if uploaded_file:
-    # Read Excel or CSV
-    if uploaded_file.name.endswith('.csv'):
-        df = pd.read_csv(uploaded_file, header=0)
-    else:
-        df = pd.read_excel(uploaded_file, header=0)
+    xl = pd.ExcelFile(uploaded_file)
+    sheet_name = st.sidebar.selectbox("Select the sheet with your data", xl.sheet_names)
 
-    st.success("File uploaded successfully!")
-    
-    # Select numeric columns only
-    numeric_cols = df.select_dtypes(include='number').columns.tolist()
-    
-    if not numeric_cols:
-        st.error("No numeric columns found!")
-    else:
-        selected_col = st.selectbox("Select numeric column for control chart", numeric_cols)
+    # Ask user which row is header
+    header_row = st.sidebar.number_input("Header row (0 = first row)", min_value=0, value=0, step=1)
 
-        # Extract numeric data, flatten if needed
-        data = df[selected_col].dropna().values
+    if sheet_name:
+        df = pd.read_excel(xl, sheet_name=sheet_name, header=header_row)
+        st.write("**Preview of sheet:**")
+        st.dataframe(df.head())
 
-        # -----------------------------
-        # Control Chart Calculations
-        # -----------------------------
-        mean_val = np.mean(data)
-        sigma_val = np.std(data, ddof=1)
-        ucl = mean_val + 3*sigma_val
-        lcl = mean_val - 3*sigma_val
+        # Ask user which column is Time/Batch
+        time_col = st.sidebar.selectbox("Select Time / Batch column", df.columns)
 
-        # Plot Control Chart
-        fig, ax = plt.subplots(figsize=(12, 5))
-        ax.plot(data, marker='o', linestyle='-', color='blue', label='Data')
-        ax.axhline(mean_val, color='green', linestyle='--', label='Mean')
-        ax.axhline(ucl, color='red', linestyle='--', label='UCL (Mean + 3σ)')
-        ax.axhline(lcl, color='red', linestyle='--', label='LCL (Mean - 3σ)')
+        # Automatically take all other columns as numeric parameters
+        param_cols = [c for c in df.columns if c != time_col]
+        st.sidebar.write("Parameters detected:", param_cols)
 
-        # Highlight Out-of-Control Points
-        out_of_control = np.where((data > ucl) | (data < lcl))[0]
-        ax.scatter(out_of_control, data[out_of_control], color='red', s=100, label='Out of Control')
+        if param_cols and st.sidebar.button("Process & Update Excel"):
+            working = df.copy()
 
-        ax.set_title(f"Control Chart for {selected_col}")
-        ax.set_xlabel("Sample Number / Sequence")
-        ax.set_ylabel("Value")
-        ax.legend()
-        ax.grid(True)
-        st.pyplot(fig)
+            for col in param_cols:
+                # Ensure numeric (skip cleaning since data is already numeric)
+                col_values = pd.to_numeric(working[col], errors='coerce')
 
-        # Summary
-        st.markdown("### Control Chart Summary")
-        st.write(f"Mean: {mean_val:.2f}")
-        st.write(f"Standard Deviation: {sigma_val:.2f}")
-        st.write(f"UCL: {ucl:.2f}, LCL: {lcl:.2f}")
-        st.write(f"Number of points out of control: {len(out_of_control)}")
+                # Compute Control Chart metrics
+                CL = col_values.mean(skipna=True)
+                MR = col_values.diff().abs()
+                MRbar = MR[1:].mean() if len(MR) > 1 else 0
+                d2 = 1.128
+                UCL = CL + 3 * (MRbar / d2)
+                LCL = max(0, CL - 3 * (MRbar / d2))
+
+                # Add new columns
+                working[f'{col}_CL'] = CL
+                working[f'{col}_MR'] = MR
+                working[f'{col}_MRbar'] = MRbar
+                working[f'{col}_UCL'] = UCL
+                working[f'{col}_LCL'] = LCL
+
+            # Save to Excel in memory
+            out_xlsx = BytesIO()
+            with pd.ExcelWriter(out_xlsx, engine='openpyxl') as writer:
+                working.to_excel(writer, sheet_name=sheet_name, index=False)
+            out_xlsx.seek(0)
+
+            st.success("Excel updated with control chart metrics!")
+            st.download_button(
+                "Download updated Excel",
+                data=out_xlsx,
+                file_name="control_chart_updated.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+else:
+    st.info("Upload an Excel workbook to get started.")
