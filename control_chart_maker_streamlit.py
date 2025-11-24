@@ -161,7 +161,9 @@ if uploaded_file is not None:
 
                 # Write updated df to Excel
                 working.to_excel(writer, sheet_name=sheet_name, index=False)
-                writer.save()
+                with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+                    updated_df.to_excel(writer, index=False)
+
                 out_xlsx.seek(0)
 
                 # Save PPTX
